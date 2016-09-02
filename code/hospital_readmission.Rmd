@@ -1,0 +1,249 @@
+---
+title: "Hospital Readmission Analysis"
+output: pdf_document
+header-includes:
+   - \usepackage{bbm}
+---
+
+Introduction
+
+Due to recent changes to Medicare and Medicaid policies, which prevent the reimbursement of hospitals for services regarding readmission of diabetes patients within 30 days of discharge, the importance of predicting a readmissions has become a pressing concern. 
+
+In this study, a dataset of hospital admissions from 130 hospitals from 1999-2008 is analyzed to produce a suitable classification model for this purpose. There are two main goals - identifying which variables are most important in causing a readmission within 30 days, and creating a classification model that can predict whether a patient will be readmitted in 30 days or not.
+
+10-fold cross-validation and LASSO logistic regression are used extensively to produce candidate models, which were then evaluated on several sets of criteria. Ultimately a model was produced that satisfied both goals, containing the following variables: time spent in the hospital, the number of medications, number of emergency visits in the past year, number of inpatient visits in the past year, number of diagnoses, whether diabetes medication was prescribed, where the patient was discharged to, age, diagnosis IDs, and whether the patient had been previously admitted.
+
+Unfortunately, in terms of predictive power, the model performs much worse than if we simply classified all admissions as not readmitted within 30 days, rendering our conclusions moot. With more time, next steps would include constructing additional variables from the data, and data transformations.
+
+```{r, echo=FALSE, results="hide", message=FALSE, warning=FALSE}
+library(leaps)
+library(pROC)
+library(glmnet)
+library(MASS)
+library(dplyr)
+library(car)
+library(xtable)
+rm(list=ls())
+setwd("C:/Users/bllguo/Dropbox/penn_spring_15-16/STAT471/mini_Project")
+data=read.csv("readmission.csv")
+```
+
+There are `r dim(data)[1]` admissions and `r dim(data)[2]` variables in the dataset. There are also `r sum(is.na(data))` missing values.
+The total percentage of admissions that are readmissions within 30 days is `r 100*table(data$readmitted)[[1]] / (table(data$readmitted)[[2]]+table(data$readmitted)[[3]])`%. A plot is shown below: 
+
+```{r, echo=FALSE}
+plot(data$readmitted)
+```
+```{r, echo=FALSE,results='hide'}
+levels(data$readmitted)[levels(data$readmitted)==">30"] <- "NO"
+data$readmitted = relevel(data$readmitted,"NO")
+```
+
+The NO level indicates admissions where patients did not have to be readmitted. Since we are only concerned with predicting whether someone is readmitted within 30 days or not, I combined >30 and NO into one level.
+
+Since some admissions are readmissions - how many unique patients are there? This question could be answered by looking at the unique patient ID's in the dataset. There are `r length(unique(data$patient_nbr))` patients. 
+
+This leads me to wonder - if someone were to be admitted once, then readmitted, they may have special health issues that increase the likelihood of them being readmitted yet again. To account for this I created an indicator variable prev_admit that takes the value 1 if the patient was admitted multiple times, and 0 if only once. 
+
+```{r, echo=FALSE}
+data[,"prev_admit"] = as.integer(duplicated(data$patient_nbr))
+data$encounter_id = NULL
+data$patient_nbr = NULL
+```
+
+Besides using patient ID's for constructing prev_admit, there seemed to be no use for the variable. The admission ID's were also not useful. Both were discarded, leaving me with a `r dim(data)[2]` variable dataset and 29 potential predictors. Let's look at some of the individual variables. 
+
+Demographic information is provided; namely, race and gender:
+
+```{r, echo=FALSE}
+table(data$race)
+table(data$gender)
+```
+
+```{r, echo=FALSE}
+plot(data$race,data$readmitted)
+plot(data$gender,data$readmitted)
+```
+
+Neither seems particularly useful, at a glance, at separating patients. A variable that would intuitively seem useful is number_inpatient, the number of inpatient visits in the prior year. 
+
+```{r, echo=FALSE}
+summary(data$number_inpatient)
+```
+
+Most people make none, but there are a select few that make many inpatient visits.
+
+```{r, echo=FALSE}
+plot(data$readmitted,data$number_inpatient)
+```
+
+As expected there is a lot more variability here, though the means are extremely close. Another variable might be time spent in the hospital.
+
+```{r, echo=FALSE}
+summary(data$time_in_hospital)
+```
+
+```{r, echo=FALSE}
+plot(data$readmitted,data$time_in_hospital)
+```
+
+Surprisingly it appears not to be. Let's lastly check our constructed variable prev_admit.
+
+```{r, echo=FALSE}
+summary(data$prev_admit)
+```
+
+```{r, echo=FALSE}
+plot(data$readmitted,data$prev_admit)
+```
+
+It appears that too many people have 0 readmissions.
+
+I. Identifying important factors in readmissions
+
+Let's proceed to try and fit some models. First I aim for a parsimonious model that captures the most important factors in readmission. Using LASSO I will identify a subset of variables. 
+For this purpose I will use 10-fold cross-validation using the deviance criterion. If my goal were strictly for classification I would use other criteria such as AUC and MCE. Those will come in handy in later models. 
+
+```{r, results='hide', echo=FALSE}
+set.seed(123)
+X2 = model.matrix(readmitted~., data)[,-1]
+dim(X2)
+Y2 = data$readmitted
+fit2.cv.dev=cv.glmnet(X2, Y2, alpha=1, family="binomial", nfolds = 10, type.measure = "deviance")
+plot(fit2.cv.dev)
+coef.min.dev=coef(fit2.cv.dev, s="lambda.1se")
+coef.min.dev
+```
+
+The resulting set of variables chosen: time spent in the hospital, the number of medications, number of emergency visits in the past year, number of inpatient visits in the past year, number of diagnoses, whether diabetes medication was prescribed, where the patient was discharged to, age, diagnosis IDs, and prev_admit. 
+
+```{r, echo=FALSE, results='hide'}
+var.names.dev=coef.min.dev[which(coef.min.dev!=0), ]
+var.names.dev
+fit.dev = glm(readmitted ~ 
+                time_in_hospital +
+                num_medications+
+                number_emergency+
+                number_inpatient+
+                number_diagnoses+
+                diabetesMed+
+                disch_disp_modified+
+                age_mod+
+                diag1_mod+
+                prev_admit, data, family="binomial")
+summary(fit.dev)
+Anova(fit.dev)
+fit.dev.roc=roc(data$readmitted, fit.dev$fitted, plot=T, col="blue")  
+fit.dev.roc$auc
+```
+
+Looking at the anova tests, all variables are significant at 0.05. (Refer to appendices for model summaries)
+
+Looking into the relationships: Time in hospital has a positive $\beta$, indicating the log odds probability of being readmitted in < 30 days increases the longer the hospital visit is. This does not makes sense as longer visits should mean more comprehensive examinations and care. Perhaps the people who need to be in the hospital for longer are also people who have poorer health, explaining this effect.
+
+Number of medications has a positive $\beta$. Perhaps this relationship can be explained by complications with a large number of medications, such as misuse? DiabetesMed also has a positive relationship, indicating that prescribing diabetes medication increases readmission chance as opposed to not prescribing. This is a hard to explain effect.
+
+Number of emergency visits and number of inpatient visits are positive. This makes sense, as they can be interpreted as signs of poorer health people who need to go to the hospital often.
+
+Age and where one is discharged to are significant as well. People who are not discharged to home, but instead the Home Health Service/SNF/Other, and people that are older, are at higher risk. These are obvious relationships.
+
+Prev_admit has a positive $\beta$ as well, which makes sense - if one were readmitted before, one is more likely to be readmitted again.
+
+II. Prediction and classification
+
+Now we change our goal to building a predictive model. Assuming that the cost of mislabeling a readmission, a10, is 2, and the cost of mislabeling a non-readmission, a01, is 1, then the cost-minimizing threshold is 1/3rd by Bayes' Rule. This will be the specific classifier we will use when calculating misclassification error MCE. 
+
+To build candidate models, we will run cross-validation with type-measure "class" (which evaluates based on MCE) and type-measure "auc". Then we will consider all the models we have built thus far according to the MCE and AUC criteria.
+
+```{r, echo=FALSE, results='hide'}
+fit2.cv.class=cv.glmnet(X2, Y2, alpha=1, family="binomial", nfolds = 10, type.measure = "class")
+fit2.cv.auc=cv.glmnet(X2, Y2, alpha=1, family="binomial", nfolds = 10, type.measure = "auc")
+plot(fit2.cv.class)
+coef.min.class=coef(fit2.cv.class, s="lambda.min")
+coef.min.class
+plot(fit2.cv.auc)
+coef.min.auc=coef(fit2.cv.auc, s="lambda.1se")
+coef.min.auc
+var.names.class=coef.min.class[which(coef.min.class!=0), ]
+var.names.class
+# Only 2 variables!
+# 
+fit.class = glm(readmitted ~ number_inpatient + prev_admit, data, family="binomial")
+summary(fit.class)
+fit.class.roc=roc(data$readmitted, fit.class$fitted, plot=T, col="blue")  
+fit.class.roc$auc
+# 0.6154
+
+var.names.auc=coef.min.auc[which(coef.min.auc!=0), ]
+var.names.auc
+fit.auc = glm(readmitted ~ 
+                time_in_hospital +
+                num_medications+
+                number_emergency+
+                number_inpatient+
+                number_diagnoses+
+                A1Cresult+
+                metformin+
+                insulin+
+                diabetesMed+
+                disch_disp_modified+
+                age_mod+
+                diag1_mod+
+                diag2_mod+
+                diag3_mod+
+                prev_admit, data, family="binomial")
+fit.auc.roc=roc(data$readmitted, fit.auc$fitted, plot=T, col="blue")  
+fit.auc.roc$auc
+```
+
+Surprisingly, the model suggested by cross-validation with type.measure=class has only two variables - number_inpatient and prev admit. The model suggested using AUC is much larger. It contains all the variables from the model in section 1, plus A1Cresult, metformin, and insulin. A1Cresult is the result from a A1C medical test. Metformin and insulin are variables indicating whether the dosages of those drugs were changed.
+
+Let Models 1, 2, and 3 be the models built using cross-validation with type.measure=deviance, type.measure=class, and type.measure=auc, respectively. Then the AUC values for said models are `r fit.dev.roc$auc`, `r fit.class.roc$auc`, and `r fit.auc.roc$auc`. Unsurprisingly, model 3 has the best value of AUC. 
+
+What of the MCE performance?
+
+```{r, echo=FALSE, results='hide'}
+fit.dev.pred=rep("0", 101766)
+fit.dev.pred[fit.dev$fitted > 1/3]="1" 
+MCE.dev=(sum(2*(fit.dev.pred[data$readmitted == "<30"] != "1")) 
+         + sum((fit.dev.pred[data$readmitted == "NO"] != "0")))/length(data$readmitted)
+MCE.dev
+
+fit.class.pred=rep("0", 101766)
+fit.class.pred[fit.class$fitted > 1/3]="1" 
+MCE.class=(sum(2*(fit.class.pred[data$readmitted == "<30"] != "1")) 
+         + sum((fit.class.pred[data$readmitted == "NO"] != "0")))/length(data$readmitted)
+MCE.class
+
+fit.auc.pred=rep("0", 101766)
+fit.auc.pred[fit.auc$fitted > 1/3]="1" 
+MCE.auc=(sum(2*(fit.auc.pred[data$readmitted == "<30"] != "1")) 
+         + sum((fit.auc.pred[data$readmitted == "NO"] != "0")))/length(data$readmitted)
+MCE.auc
+```
+
+The MCE values under the Bayesian classifier are `r MCE.dev`, `r MCE.class`, and `r MCE.auc`. Unsurprisingly, model 2 has the lowest and best value. However, it has the worst AUC. Similarly model 3 has the worst MCE. As a middle ground, let's choose model 1 to be the final classification model. Ultimately the criteria values are so similar it does not make too much difference.
+
+Unfortunately, recalling that the total percentage of admissions that are readmissions within 30 days is `r 100*table(data$readmitted)[[2]] / (table(data$readmitted)[[1]])`%, our models' predictive capabilities are quite poor. If we simply use a zero classifier, i.e. classify all admissions as not going to be readmitted in <30 days, our MCE is `r table(data$readmitted)[[2]] / (table(data$readmitted)[[1]])`. At the minimum we would want to do better than the zero classifier.
+
+Next steps might include data transformation, or defining new variables similar to how prev_admit was constructed. For instance, the means of number of inpatient visits in the two classes are similar but the range of values and the variabilities are not. Logarithmic transformations could be useful.
+
+Appendices:
+
+Model 1
+
+```{r}
+summary(fit.dev)
+```
+
+Model 2
+
+```{r}
+summary(fit.class)
+```
+
+Model 3
+
+```{r}
+summary(fit.auc)
+```
